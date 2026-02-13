@@ -43,7 +43,7 @@ ROUND_PATTERNS = [
     re.compile(r"（[一二三四五六七八九十\d]+[批期]）"),     # （一）批
     re.compile(r"\([一二三四五六七八九十\d]+[批期]\)"),     # (1)批
 ]
-# 去掉的后缀（公告类型）
+# 去掉的后缀（公告类型）；更长、更具体的放前面，避免被短后缀先匹配
 SUFFIX_PATTERNS = [
     re.compile(r"招标公告$"),
     re.compile(r"中标公告$"),
@@ -55,8 +55,10 @@ SUFFIX_PATTERNS = [
     re.compile(r"竞争性磋商.*$"),
     re.compile(r"询价.*$"),
     re.compile(r"结果信息公开$"),
-    re.compile(r"结果公示$"),
+    re.compile(r"评审结果公示$"),   # 与「结果公示」区分，先 strip 整段，避免留下「评审」
     re.compile(r"入围结果公示$"),
+    re.compile(r"结果公示$"),
+    re.compile(r"征询变更公告$"),   # 征询变更公告 → 与采购公告等同项目
 ]
 # 日期、编号等噪音
 NOISE_PATTERNS = [
@@ -85,7 +87,7 @@ def parse_project_name_core(project_name: str) -> str:
 
     # 统一空白、竖线等
     s = re.sub(r"[\s\|]+", " ", s)
-    s = s.strip(" \-_|")
+    s = s.strip(r" \-_|")
     return s[:200] if s else ""  # 截断过长
 
 
