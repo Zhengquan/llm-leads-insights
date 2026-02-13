@@ -175,4 +175,4 @@ cython_debug/
 data/
 .DS_Store
 config.json
-data_cleaned/
+data_*/
