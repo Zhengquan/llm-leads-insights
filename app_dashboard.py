@@ -78,6 +78,15 @@ def main():
     sel_layer = st.sidebar.multiselect("层级 (llm_layer)", layer_options, default=["全部"])
     link_options = ["全部"] + sorted(df["link_type"].dropna().unique().astype(str).tolist())
     sel_link = st.sidebar.multiselect("关联类型 (link_type)", link_options, default=["全部"])
+    # 供应商（中标单位）：筛选该供应商中标的记录，用于供应商视角分析
+    supplier_col = "中标单位"
+    if supplier_col in df.columns:
+        suppliers = df[supplier_col].dropna().astype(str).str.strip()
+        suppliers = sorted(suppliers[suppliers != ""].unique().tolist())
+        supplier_options = ["全部"] + suppliers
+        sel_supplier = st.sidebar.multiselect("供应商（中标单位）", supplier_options, default=["全部"], key="supplier")
+    else:
+        sel_supplier = ["全部"]
 
     # 应用筛选
     year_min, year_max = year_range[0], year_range[1]
@@ -94,6 +103,9 @@ def main():
         d = d[d["llm_layer"].astype(str).isin(sel_layer)]
     if "全部" not in sel_link:
         d = d[d["link_type"].astype(str).isin(sel_link)]
+    if "全部" not in sel_supplier and supplier_col in d.columns:
+        # 供应商视角：只保留 中标单位 属于所选供应商的记录（即该供应商中标的记录）
+        d = d[d[supplier_col].notna() & (d[supplier_col].astype(str).str.strip().isin(sel_supplier))]
 
     if d.empty:
         st.warning("当前筛选条件下无数据，请放宽筛选条件。")
@@ -193,6 +205,33 @@ def main():
             cust_layer_wide = cust_layer.pivot(index="customer", columns="llm_layer", values="count").fillna(0)
             st.subheader("大模型项目：客户 × 层级")
             st.dataframe(cust_layer_wide.head(20), use_container_width=True)
+
+            # 大模型项目：客户 × 项目（每客户按金额、时间 Top 5）
+            st.subheader("大模型项目：客户 × 项目")
+            st.caption("每个客户下按金额(万元)降序、再按项目时间降序，取 Top 5 项目。")
+            llm_projects = d[d["is_llm"]]["project_id"].unique()
+            pa_llm = project_amt[project_amt["project_id"].isin(llm_projects)].copy()
+            if not pa_llm.empty:
+                proj_name = d[["project_id", "project_name_core"]].drop_duplicates("project_id", keep="first")
+                proj_date = d.groupby("project_id")["发布日期"].max().reset_index().rename(columns={"发布日期": "项目日期"})
+                pa_llm = pa_llm.merge(proj_name, on="project_id", how="left")
+                pa_llm = pa_llm.merge(proj_date, on="project_id", how="left")
+                pa_llm["项目名"] = pa_llm["project_name_core"].fillna(pa_llm["project_id"])
+                for cust in sorted(pa_llm["customer"].dropna().unique()):
+                    sub = pa_llm[pa_llm["customer"] == cust].sort_values(
+                        ["amount_wan_yuan", "项目日期"],
+                        ascending=[False, False],
+                        na_position="last",
+                    ).head(5)
+                    if sub.empty:
+                        continue
+                    sub_display = sub[["项目名", "amount_wan_yuan", "项目日期", "llm_layer"]].copy()
+                    sub_display = sub_display.rename(columns={"amount_wan_yuan": "金额(万元)", "llm_layer": "层级"})
+                    sub_display["项目日期"] = pd.to_datetime(sub_display["项目日期"], errors="coerce").dt.strftime("%Y-%m-%d")
+                    with st.expander(f"**{cust}**（{len(sub)} 个项目）"):
+                        st.dataframe(sub_display, use_container_width=True, hide_index=True)
+            else:
+                st.info("当前筛选下无大模型项目金额数据。")
 
     with tab_amount:
         st.subheader("金额分析")
