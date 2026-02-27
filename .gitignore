@@ -176,3 +176,4 @@ data/
 .DS_Store
 config.json
 data_*/
+data-*/

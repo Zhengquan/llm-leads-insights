@@ -5,16 +5,74 @@
 运行: streamlit run app_dashboard.py
 """
 import os
+from collections import Counter
+
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+
+try:
+    import jieba
+except ImportError:
+    jieba = None
+try:
+    from wordcloud import WordCloud
+except ImportError:
+    WordCloud = None
 
 ANALYSIS_DIR = "data_analysis"
 ANALYSIS_FILE = "tender_analysis.csv"
 
 # 中标类记录类型：有中标金额时优先取此类
 BID_RECORD_TYPES = {"中标公告", "中标候选人公示", "成交结果", "成交公告", "结果公示"}
+
+# 词云：中文停用词（常见虚词 + 部分领域词）
+WORDCLOUD_STOPWORDS = {
+    "的", "了", "与", "及", "等", "是", "在", "和", "之", "为", "或", "有", "于", "不", "被", "把", "让", "从", "向", "到", "对", "着", "过", "各", "个", "中", "上", "下", "大", "小", "多", "少", "这", "那", "里", "项", "目", "公", "告", "采", "购", "建", "设", "有", "限", "公", "司", "股份",
+}
+
+
+def _wordcloud_font_path():
+    """返回可用于中文词云的字体路径，优先系统常见路径。"""
+    candidates = [
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/Supplemental/Songti.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _segment_and_count(text: str, min_len: int = 2, top_k: int = 50):
+    """对文本做 jieba 分词、去停用词、长度过滤，返回词频 Counter 与 Top K 列表。"""
+    if not jieba or not text or not isinstance(text, str):
+        return Counter(), []
+    text = str(text).strip()[:50000]
+    words = [w for w in jieba.lcut(text) if len(w) >= min_len and w.strip() and w not in WORDCLOUD_STOPWORDS]
+    cnt = Counter(words)
+    top = cnt.most_common(top_k)
+    return cnt, top
+
+
+def _generate_wordcloud_image(freq: Counter, width: int = 800, height: int = 400, max_words: int = 100):
+    """根据词频 Counter 生成词云 PIL 图像；无有效词时返回 None。"""
+    if not WordCloud or not freq:
+        return None
+    font_path = _wordcloud_font_path()
+    wc = WordCloud(
+        width=width,
+        height=height,
+        max_words=max_words,
+        background_color="white",
+        font_path=font_path,
+        prefer_horizontal=0.7,
+    )
+    wc.generate_from_frequencies(dict(freq))
+    return wc.to_image()
 
 
 def get_project_amounts(d: pd.DataFrame) -> pd.DataFrame:
@@ -128,8 +186,8 @@ def main():
         st.sidebar.metric("当前筛选总金额(万元)", f"{project_amt['amount_wan_yuan'].sum():,.0f}")
 
     # ----- 主区域：多 Tab -----
-    tab_trend, tab_type, tab_layer, tab_customer, tab_amount, tab_track, tab_detail = st.tabs(
-        ["年度趋势", "项目类型", "层级分布", "客户分布", "金额分析", "项目追踪", "明细表"]
+    tab_trend, tab_type, tab_layer, tab_customer, tab_amount, tab_track, tab_wordcloud, tab_detail = st.tabs(
+        ["年度趋势", "项目类型", "层级分布", "客户分布", "金额分析", "项目追踪", "词云", "明细表"]
     )
 
     with tab_trend:
@@ -411,6 +469,57 @@ def main():
                     show = proj_d[timeline_cols].copy()
                     show = show.rename(columns={"amount_wan_yuan": "金额(万元)", "record_type": "类型", "link_type": "关联"})
                     st.dataframe(show.sort_values("发布日期", ascending=True), use_container_width=True)
+
+    with tab_wordcloud:
+        st.subheader("词云：按项目类别展示关键字")
+        st.caption("基于项目名称/核心名分词统计，按所选维度划分类别，每类展示词云与 Top 词表。")
+        if not jieba or not WordCloud:
+            st.warning("请安装 jieba 与 wordcloud 后使用词云功能：pip install jieba wordcloud")
+        else:
+            text_col = st.radio("文本来源", ["项目核心名 (project_name_core)", "项目名称"], horizontal=True, key="wc_text")
+            text_key = "project_name_core" if "核心名" in text_col else "项目名称"
+            if text_key not in d.columns:
+                st.info(f"当前数据无列 {text_key}，无法生成词云。")
+            else:
+                dim_opts = [
+                    ("按记录类型 (record_type)", "record_type"),
+                    ("按层级 (llm_layer)", "llm_layer"),
+                    ("按客户 (customer)", "customer"),
+                    ("按是否大模型 (is_llm)", "is_llm"),
+                ]
+                dim_labels = [x[0] for x in dim_opts]
+                dim_cols = [x[1] for x in dim_opts]
+                available = [c for c in dim_cols if c in d.columns]
+                if not available:
+                    st.info("无可用划分维度列。")
+                else:
+                    # 默认按层级 llm_layer 展示；若无该列则取第一个可用维度
+                    idx = 1 if "llm_layer" in d.columns else next((i for i, c in enumerate(dim_cols) if c in d.columns), 0)
+                    sel_dim_label = st.selectbox("划分维度", dim_labels, index=idx, key="wc_dim")
+                    dim_col = dim_cols[dim_labels.index(sel_dim_label)]
+                    max_cats = st.slider("最多展示类别数", 3, 30, 15, key="wc_max_cats")
+                    top_k_words = st.slider("每类 Top 词数", 10, 100, 30, key="wc_topk")
+                    grouped = d.groupby(d[dim_col].fillna("(空)").astype(str), dropna=False)
+                    # 按记录数排序，取前 max_cats 个
+                    cat_counts = grouped.size().sort_values(ascending=False)
+                    cats_to_show = cat_counts.head(max_cats).index.tolist()
+                    for cat in cats_to_show:
+                        sub = grouped.get_group(cat) if cat in grouped.groups else d[d[dim_col].fillna("(空)").astype(str) == cat]
+                        if sub.empty:
+                            continue
+                        text_list = sub[text_key].fillna("").astype(str).tolist()
+                        combined = " ".join(t for t in text_list if t.strip())
+                        cnt, top_list = _segment_and_count(combined, min_len=2, top_k=top_k_words)
+                        img = _generate_wordcloud_image(cnt)
+                        with st.expander(f"**{cat}**（{len(sub)} 条）"):
+                            if not cnt:
+                                st.caption("该类别下无有效分词结果。")
+                            else:
+                                if img is not None:
+                                    st.image(img, use_container_width=True)
+                                if top_list:
+                                    st.caption("高频词 Top " + str(len(top_list)))
+                                    st.dataframe(pd.DataFrame(top_list, columns=["词", "频次"]), use_container_width=True, hide_index=True)
 
     with tab_detail:
         st.subheader("明细数据")
